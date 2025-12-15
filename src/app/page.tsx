@@ -1,14 +1,58 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Scale, Pill, Heart, TrendingDown, Calendar, Plus, Trash2, Droplet, Moon, Dumbbell, Smile, Activity, Target, Award, ArrowRight, CheckCircle2, CreditCard, Sparkles } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { Scale, Pill, Heart, TrendingDown, Calendar, Plus, Trash2, Droplet, Moon, Dumbbell, Smile, Activity, Target, Award, ArrowRight, CheckCircle2, CreditCard, Sparkles, Image as ImageIcon, Upload, Apple, Utensils, Lock, AlertCircle, LogOut } from 'lucide-react';
 import { storage } from '@/lib/storage';
 import { DiaryData, WeightEntry, MedicationEntry, HabitEntry } from '@/lib/types';
+import { PremiumDebug } from '@/components/custom/premium-debug';
+import { getCurrentUser, signOut, isAuthenticated } from '@/lib/supabase';
 
 export default function Home() {
-  const [showQuiz, setShowQuiz] = useState(true);
+  const router = useRouter();
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
+  // Verificar autenticação ao carregar
+  useEffect(() => {
+    const checkAuth = async () => {
+      try {
+        const authenticated = await isAuthenticated();
+        if (!authenticated) {
+          router.push('/auth');
+          return;
+        }
+
+        const user = await getCurrentUser();
+        setCurrentUser(user);
+      } catch (error) {
+        console.error('Erro ao verificar autenticação:', error);
+        router.push('/auth');
+      } finally {
+        setIsAuthChecking(false);
+      }
+    };
+
+    checkAuth();
+  }, [router]);
+
+  const handleLogout = async () => {
+    try {
+      await signOut();
+      router.push('/auth');
+    } catch (error) {
+      console.error('Erro ao fazer logout:', error);
+    }
+  };
+
+  const [showQuiz, setShowQuiz] = useState(false);
   const [quizStep, setQuizStep] = useState(0);
   const [quizCompleted, setQuizCompleted] = useState(false);
+  const [showPersonalizedPlan, setShowPersonalizedPlan] = useState(false);
+  const [showSubscriptionPage, setShowSubscriptionPage] = useState(false);
+  const [showPlanSelection, setShowPlanSelection] = useState(false);
+  const [isPremium, setIsPremium] = useState(false);
+  const [showUpgradeAlert, setShowUpgradeAlert] = useState(false);
   const [quizData, setQuizData] = useState({
     usingGLP1: '',
     medication: '',
@@ -16,8 +60,14 @@ export default function Home() {
     applicationFrequency: '',
     gender: '',
     birthDate: '',
+    birthDay: '',
+    birthMonth: '',
+    birthYear: '',
     measurements: { height: '', weight: '', waist: '' },
     protocolStartDate: '',
+    protocolStartDay: '',
+    protocolStartMonth: '',
+    protocolStartYear: '',
     startingWeight: '',
     targetWeight: '',
     goalSpeed: '',
@@ -30,9 +80,13 @@ export default function Home() {
     phone: ''
   });
 
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'weight' | 'medication' | 'habits'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'weight' | 'medication' | 'habits' | 'plan' | 'emagrecer'>('dashboard');
   const [data, setData] = useState<DiaryData>({ weights: [], medications: [], habits: [] });
   const [isClient, setIsClient] = useState(false);
+
+  // Estados para fotos de evolução
+  const [beforePhoto, setBeforePhoto] = useState<string | null>(null);
+  const [afterPhoto, setAfterPhoto] = useState<string | null>(null);
 
   // Formulários
   const [weightForm, setWeightForm] = useState({ date: '', weight: '', notes: '' });
@@ -49,25 +103,248 @@ export default function Home() {
 
   useEffect(() => {
     setIsClient(true);
+    
+    // Verificar se retornou de um pagamento cancelado
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('cancelled') === 'true') {
+      console.log('⚠️ Pagamento cancelado pelo usuário');
+      // Limpar parâmetro da URL
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+    
+    // Verificar status do quiz
     const hasCompletedQuiz = localStorage.getItem('quizCompleted');
     if (hasCompletedQuiz) {
+      setQuizCompleted(true);
       setShowQuiz(false);
     }
+    
+    // Verificar status premium com múltiplas fontes
+    const premiumStatus = localStorage.getItem('isPremium');
+    const paymentInfo = localStorage.getItem('paymentInfo');
+    const premiumActivatedAt = localStorage.getItem('premiumActivatedAt');
+    
+    if (premiumStatus === 'true' || paymentInfo) {
+      setIsPremium(true);
+      console.log('✅ Usuário Premium detectado', {
+        premiumStatus,
+        hasPaymentInfo: !!paymentInfo,
+        activatedAt: premiumActivatedAt
+      });
+      
+      // Sincronizar dados se necessário
+      if (!premiumStatus && paymentInfo) {
+        localStorage.setItem('isPremium', 'true');
+        console.log('🔄 Status premium sincronizado');
+      }
+    } else {
+      console.log('ℹ️ Usuário gratuito');
+    }
+    
     setData(storage.loadData());
+    
+    // Carregar fotos salvas
+    const savedBeforePhoto = localStorage.getItem('beforePhoto');
+    const savedAfterPhoto = localStorage.getItem('afterPhoto');
+    if (savedBeforePhoto) setBeforePhoto(savedBeforePhoto);
+    if (savedAfterPhoto) setAfterPhoto(savedAfterPhoto);
+
+    // Carregar dados do quiz salvos
+    const savedQuizData = localStorage.getItem('quizData');
+    if (savedQuizData) {
+      setQuizData(JSON.parse(savedQuizData));
+    }
   }, []);
+
+  // Salvar dados do quiz automaticamente sempre que mudarem
+  useEffect(() => {
+    if (isClient && quizData.name) {
+      localStorage.setItem('quizData', JSON.stringify(quizData));
+      
+      // Adicionar automaticamente peso inicial se fornecido
+      if (quizData.startingWeight && quizData.protocolStartDay && quizData.protocolStartMonth && quizData.protocolStartYear) {
+        const startDate = `${quizData.protocolStartYear}-${String(quizData.protocolStartMonth).padStart(2, '0')}-${String(quizData.protocolStartDay).padStart(2, '0')}`;
+        
+        // Verificar se já existe um registro de peso para essa data
+        const existingWeight = data.weights.find(w => w.date === startDate);
+        
+        if (!existingWeight) {
+          storage.addWeight({
+            date: startDate,
+            weight: parseFloat(quizData.startingWeight),
+            notes: 'Peso inicial do protocolo GLP-1',
+          });
+          setData(storage.loadData());
+        }
+      }
+
+      // Adicionar automaticamente primeira dose de medicação se fornecida
+      if (quizData.medication && quizData.currentDose && quizData.protocolStartDay && quizData.protocolStartMonth && quizData.protocolStartYear) {
+        const startDate = `${quizData.protocolStartYear}-${String(quizData.protocolStartMonth).padStart(2, '0')}-${String(quizData.protocolStartDay).padStart(2, '0')}`;
+        
+        // Verificar se já existe um registro de medicação para essa data
+        const existingMed = data.medications.find(m => m.date === startDate);
+        
+        if (!existingMed) {
+          storage.addMedication({
+            date: startDate,
+            medication: quizData.medication as any,
+            dosage: quizData.currentDose,
+            time: '08:00',
+            notes: 'Primeira dose do protocolo',
+          });
+          setData(storage.loadData());
+        }
+      }
+
+      // Adicionar automaticamente hábitos iniciais baseados no quiz
+      if (quizData.protocolStartDay && quizData.protocolStartMonth && quizData.protocolStartYear) {
+        const startDate = `${quizData.protocolStartYear}-${String(quizData.protocolStartMonth).padStart(2, '0')}-${String(quizData.protocolStartDay).padStart(2, '0')}`;
+        
+        // Verificar se já existe um registro de hábito para essa data
+        const existingHabit = data.habits.find(h => h.date === startDate);
+        
+        if (!existingHabit && quizData.activityLevel) {
+          const waterIntake = parseInt(calculateWaterIntake());
+          const exerciseByLevel = {
+            'sedentario': false,
+            'leve': true,
+            'moderado': true,
+            'intenso': true
+          };
+          
+          storage.addHabit({
+            date: startDate,
+            waterIntake: waterIntake,
+            exercise: exerciseByLevel[quizData.activityLevel as keyof typeof exerciseByLevel] || false,
+            exerciseMinutes: quizData.activityLevel === 'intenso' ? 60 : quizData.activityLevel === 'moderado' ? 45 : quizData.activityLevel === 'leve' ? 30 : undefined,
+            sleep: 8,
+            mood: 'bom',
+            notes: 'Início do protocolo - metas baseadas no seu perfil',
+          });
+          setData(storage.loadData());
+        }
+      }
+    }
+  }, [quizData, isClient]);
 
   const refreshData = () => {
     setData(storage.loadData());
   };
 
-  const handleQuizNext = () => {
+  // Função para verificar se usuário pode acessar funcionalidade
+  const canAccessFeature = () => {
+    // Usuário premium tem acesso completo independente do quiz
+    return isPremium;
+  };
+
+  // Função para mostrar alerta de upgrade
+  const handleLockedFeatureClick = () => {
+    if (!quizCompleted) {
+      setShowUpgradeAlert(true);
+      setTimeout(() => setShowUpgradeAlert(false), 5000);
+    } else if (!isPremium) {
+      setShowUpgradeAlert(true);
+      setTimeout(() => setShowUpgradeAlert(false), 5000);
+    }
+  };
+
+  // Handlers para upload de fotos
+  const handlePhotoUpload = (type: 'before' | 'after', event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const result = reader.result as string;
+        if (type === 'before') {
+          setBeforePhoto(result);
+          localStorage.setItem('beforePhoto', result);
+        } else {
+          setAfterPhoto(result);
+          localStorage.setItem('afterPhoto', result);
+        }
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleRemovePhoto = (type: 'before' | 'after') => {
+    if (type === 'before') {
+      setBeforePhoto(null);
+      localStorage.removeItem('beforePhoto');
+    } else {
+      setAfterPhoto(null);
+      localStorage.removeItem('afterPhoto');
+    }
+  };
+
+  // Função para calcular próxima aplicação
+  const calculateNextApplication = () => {
+    if (!quizData.protocolStartDay || !quizData.protocolStartMonth || !quizData.protocolStartYear) {
+      return 'Não disponível';
+    }
+
+    const startDate = new Date(
+      parseInt(quizData.protocolStartYear),
+      parseInt(quizData.protocolStartMonth) - 1,
+      parseInt(quizData.protocolStartDay)
+    );
+
+    const today = new Date();
+    const diffTime = today.getTime() - startDate.getTime();
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+    let intervalDays = 7; // padrão semanal
+    if (quizData.applicationFrequency === 'quinzenal') intervalDays = 14;
+    if (quizData.applicationFrequency === 'diaria') intervalDays = 1;
+
+    const daysSinceLastApplication = diffDays % intervalDays;
+    const daysUntilNext = intervalDays - daysSinceLastApplication;
+
+    const nextDate = new Date(today);
+    nextDate.setDate(today.getDate() + daysUntilNext);
+
+    return nextDate.toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' });
+  };
+
+  // Função para calcular água recomendada
+  const calculateWaterIntake = () => {
+    const weight = parseFloat(quizData.measurements.weight) || 70;
+    const waterInLiters = (weight * 35) / 1000; // 35ml por kg
+    return waterInLiters.toFixed(1);
+  };
+
+  // Função para calcular proteína recomendada
+  const calculateProtein = () => {
+    const weight = parseFloat(quizData.measurements.weight) || 70;
+    const proteinInGrams = weight * 1.6; // 1.6g por kg para perda de peso
+    return Math.round(proteinInGrams);
+  };
+
+  // Função para calcular fibras recomendadas
+  const calculateFiber = () => {
+    return quizData.gender === 'feminino' ? '25' : '30'; // recomendação padrão
+  };
+
+  const handleQuizNext = async () => {
+    // Salvar dados do quiz a cada passo
+    localStorage.setItem('quizData', JSON.stringify(quizData));
+    
     if (quizStep < 15) {
       setQuizStep(quizStep + 1);
     } else {
-      // Salvar dados do quiz e mostrar tela de assinatura
+      // Após preencher dados pessoais, salvar localmente
       localStorage.setItem('quizData', JSON.stringify(quizData));
+      localStorage.setItem('quizCompleted', 'true');
       setQuizCompleted(true);
+      setShowQuiz(false);
+      setShowPersonalizedPlan(true);
     }
+  };
+
+  const handleContinueToSubscription = () => {
+    setShowPersonalizedPlan(false);
+    setShowPlanSelection(true);
   };
 
   const handleStartApp = () => {
@@ -75,9 +352,27 @@ export default function Home() {
     setShowQuiz(false);
   };
 
-  const handleSubscribe = () => {
-    // Redirecionar para o link de pagamento do Stripe
-    window.location.href = 'https://buy.stripe.com/00wbJ39aE2Av7KVeJf2wU00';
+  const handleSelectPlan = () => {
+    // Salvar dados do quiz antes de redirecionar
+    localStorage.setItem('quizData', JSON.stringify(quizData));
+    
+    // Salvar tipo de plano selecionado
+    localStorage.setItem('selectedPlan', 'personalized');
+    
+    // Criar timestamp único para rastreamento
+    const timestamp = Date.now();
+    const clientReferenceId = `${timestamp}_personalized_${quizData.email || 'user'}`;
+    
+    // URLs de retorno
+    const successUrl = `${window.location.origin}/success?plan=personalized&ref=${timestamp}`;
+    const cancelUrl = `${window.location.origin}?cancelled=true`;
+    
+    // URL do checkout da Stripe com parâmetros completos
+    const checkoutUrl = `https://buy.stripe.com/test_eVqfZgakZ3Oa5Fa2SjaAw00?client_reference_id=${encodeURIComponent(clientReferenceId)}&success_url=${encodeURIComponent(successUrl)}&cancel_url=${encodeURIComponent(cancelUrl)}`;
+    
+    console.log('🔄 Redirecionando para checkout:', { planType: 'personalized', clientReferenceId });
+    
+    window.location.href = checkoutUrl;
   };
 
   const isQuizStepValid = () => {
@@ -93,11 +388,11 @@ export default function Home() {
       case 4:
         return quizData.gender !== '';
       case 5:
-        return quizData.birthDate !== '';
+        return quizData.birthDay !== '' && quizData.birthMonth !== '' && quizData.birthYear !== '';
       case 6:
         return quizData.measurements.height !== '' && quizData.measurements.weight !== '';
       case 7:
-        return quizData.protocolStartDate !== '';
+        return quizData.protocolStartDay !== '' && quizData.protocolStartMonth !== '' && quizData.protocolStartYear !== '';
       case 8:
         return quizData.startingWeight !== '';
       case 9:
@@ -122,6 +417,10 @@ export default function Home() {
   // Handlers de peso
   const handleAddWeight = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canAccessFeature()) {
+      handleLockedFeatureClick();
+      return;
+    }
     if (!weightForm.date || !weightForm.weight) return;
     
     storage.addWeight({
@@ -137,6 +436,10 @@ export default function Home() {
   // Handlers de medicamento
   const handleAddMedication = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canAccessFeature()) {
+      handleLockedFeatureClick();
+      return;
+    }
     if (!medForm.date || !medForm.dosage || !medForm.time) return;
     
     storage.addMedication({
@@ -154,6 +457,10 @@ export default function Home() {
   // Handlers de hábitos
   const handleAddHabit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canAccessFeature()) {
+      handleLockedFeatureClick();
+      return;
+    }
     if (!habitForm.date) return;
     
     storage.addHabit({
@@ -180,8 +487,8 @@ export default function Home() {
 
   // Calcular estatísticas
   const getStats = () => {
-    const currentWeight = data.weights[0]?.weight || 0;
-    const initialWeight = data.weights[data.weights.length - 1]?.weight || currentWeight;
+    const currentWeight = data.weights[0]?.weight || parseFloat(quizData.measurements.weight) || 0;
+    const initialWeight = parseFloat(quizData.startingWeight) || data.weights[data.weights.length - 1]?.weight || currentWeight;
     const weightLoss = initialWeight - currentWeight;
     const medicationCount = data.medications.length;
     const habitStreak = data.habits.length;
@@ -191,7 +498,8 @@ export default function Home() {
 
   const stats = isClient ? getStats() : { currentWeight: 0, weightLoss: 0, medicationCount: 0, habitStreak: 0 };
 
-  if (!isClient) {
+  // Tela de carregamento durante verificação de autenticação
+  if (isAuthChecking || !isClient) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
         <div className="text-center">
@@ -202,407 +510,656 @@ export default function Home() {
     );
   }
 
-  // Quiz Screen
+  // Tela do Quiz
   if (showQuiz) {
-    // Tela de assinatura após completar quiz
-    if (quizCompleted) {
-      return (
-        <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl">
-            <div className="bg-white rounded-3xl shadow-2xl p-8 sm:p-12 text-center">
-              {/* Ícone de sucesso */}
-              <div className="bg-gradient-to-br from-green-500 to-emerald-600 p-4 rounded-full w-20 h-20 mx-auto mb-6 flex items-center justify-center">
-                <CheckCircle2 className="w-10 h-10 text-white" />
-              </div>
-
-              {/* Título */}
-              <h2 className="text-3xl sm:text-4xl font-bold text-gray-800 mb-3">
-                Parabéns, {quizData.name}! 🎉
-              </h2>
-              <p className="text-lg text-gray-600 mb-8">
-                Você completou o questionário inicial
-              </p>
-
-              {/* Card de assinatura */}
-              <div className="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl p-8 mb-8 text-white">
-                <div className="flex items-center justify-center gap-2 mb-4">
-                  <Sparkles className="w-6 h-6" />
-                  <h3 className="text-2xl font-bold">Diário GLP-1 Premium</h3>
-                </div>
-                
-                <p className="text-indigo-100 mb-6">
-                  Desbloqueie todos os recursos e acompanhe sua jornada completa
-                </p>
-
-                <div className="space-y-3 text-left mb-6">
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                    <span>Registro ilimitado de peso, medicação e hábitos</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                    <span>Gráficos e estatísticas detalhadas</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                    <span>Lembretes personalizados de medicação</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                    <span>Exportação de relatórios em PDF</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
-                    <span>Suporte prioritário</span>
-                  </div>
-                </div>
-
-                <div className="bg-white/20 backdrop-blur-sm rounded-xl p-4 mb-6">
-                  <div className="flex items-baseline justify-center gap-2">
-                    <span className="text-4xl font-bold">R$ 29,90</span>
-                    <span className="text-indigo-100">/mês</span>
-                  </div>
-                  <p className="text-sm text-indigo-100 mt-2">Cancele quando quiser</p>
-                </div>
-
-                <button
-                  onClick={handleSubscribe}
-                  className="w-full bg-white text-indigo-600 py-4 rounded-xl font-bold text-lg hover:bg-indigo-50 transition-all flex items-center justify-center gap-2 shadow-lg"
-                >
-                  <CreditCard className="w-5 h-5" />
-                  Assinar Agora
-                </button>
-              </div>
-
-
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    const quizQuestions = [
-      {
-        title: 'Você já está usando medicamentos GLP-1?',
-        options: [
-          { value: 'sim', label: 'Sim, já estou usando', icon: CheckCircle2 },
-          { value: 'nao', label: 'Não, ainda não comecei', icon: Activity }
-        ]
-      },
-      {
-        title: 'Qual medicamento GLP-1 você está usando?',
-        options: [
-          { value: 'ozempic', label: 'Ozempic', icon: Pill },
-          { value: 'wegovy', label: 'Wegovy', icon: Pill },
-          { value: 'mounjaro', label: 'Mounjaro', icon: Pill },
-          { value: 'zepbound', label: 'Zepbound', icon: Pill },
-          { value: 'saxenda', label: 'Saxenda', icon: Pill },
-          { value: 'outro', label: 'Outro', icon: Pill }
-        ]
-      },
-      {
-        title: 'Qual é a sua dose atual?',
-        type: 'text',
-        field: 'currentDose',
-        placeholder: 'Ex: 0.5mg, 1mg, 2.5mg'
-      },
-      {
-        title: 'Qual a frequência de aplicação?',
-        options: [
-          { value: 'semanal', label: 'Semanal', icon: Calendar },
-          { value: 'quinzenal', label: 'Quinzenal', icon: Calendar },
-          { value: 'diaria', label: 'Diária', icon: Calendar }
-        ]
-      },
-      {
-        title: 'Qual é o seu gênero?',
-        options: [
-          { value: 'masculino', label: 'Masculino', icon: Activity },
-          { value: 'feminino', label: 'Feminino', icon: Activity },
-          { value: 'outro', label: 'Prefiro não informar', icon: Activity }
-        ]
-      },
-      {
-        title: 'Qual é a sua data de nascimento?',
-        type: 'date',
-        field: 'birthDate'
-      },
-      {
-        title: 'Quais são as suas medidas?',
-        type: 'measurements',
-        fields: ['height', 'weight', 'waist']
-      },
-      {
-        title: 'Quando você começou o protocolo GLP-1?',
-        type: 'date',
-        field: 'protocolStartDate'
-      },
-      {
-        title: 'Qual era o seu peso quando começou?',
-        type: 'number',
-        field: 'startingWeight',
-        placeholder: 'Ex: 85.5 kg'
-      },
-      {
-        title: 'Qual é a sua meta atual de peso?',
-        type: 'number',
-        field: 'targetWeight',
-        placeholder: 'Ex: 70 kg'
-      },
-      {
-        title: 'O quão rápido você quer atingir sua meta?',
-        options: [
-          { value: 'lento', label: 'Lento e sustentável', icon: TrendingDown },
-          { value: 'moderado', label: 'Moderado', icon: Target },
-          { value: 'rapido', label: 'Rápido', icon: Activity }
-        ]
-      },
-      {
-        title: 'Qual é o seu nível de atividade física?',
-        options: [
-          { value: 'sedentario', label: 'Sedentário', icon: Moon },
-          { value: 'leve', label: 'Leve (1-2x/semana)', icon: Dumbbell },
-          { value: 'moderado', label: 'Moderado (3-4x/semana)', icon: Dumbbell },
-          { value: 'intenso', label: 'Intenso (5+x/semana)', icon: Dumbbell }
-        ]
-      },
-      {
-        title: 'Em qual dia o desejo por comida é mais forte?',
-        options: [
-          { value: 'segunda', label: 'Segunda-feira', icon: Calendar },
-          { value: 'terca', label: 'Terça-feira', icon: Calendar },
-          { value: 'quarta', label: 'Quarta-feira', icon: Calendar },
-          { value: 'quinta', label: 'Quinta-feira', icon: Calendar },
-          { value: 'sexta', label: 'Sexta-feira', icon: Calendar },
-          { value: 'sabado', label: 'Sábado', icon: Calendar },
-          { value: 'domingo', label: 'Domingo', icon: Calendar }
-        ]
-      },
-      {
-        title: 'Qual efeito colateral você teve mais problema?',
-        options: [
-          { value: 'nausea', label: 'Náusea', icon: Activity },
-          { value: 'vomito', label: 'Vômito', icon: Activity },
-          { value: 'diarreia', label: 'Diarreia', icon: Activity },
-          { value: 'constipacao', label: 'Constipação', icon: Activity },
-          { value: 'fadiga', label: 'Fadiga', icon: Moon },
-          { value: 'dor-cabeca', label: 'Dor de cabeça', icon: Activity },
-          { value: 'nenhum', label: 'Nenhum', icon: CheckCircle2 }
-        ]
-      },
-      {
-        title: 'O que está levando você a alcançar essa meta?',
-        type: 'textarea',
-        field: 'motivation',
-        placeholder: 'Compartilhe sua motivação...'
-      },
-      {
-        title: 'Por último, como podemos te chamar?',
-        type: 'contact',
-        fields: ['name', 'email', 'phone']
-      }
-    ];
-
-    const currentQuestion = quizQuestions[quizStep];
-
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center p-4">
-        <div className="w-full max-w-2xl">
-          {/* Progress Bar - SEM mostrar total */}
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 py-8 px-4">
+        <div className="max-w-2xl mx-auto">
+          {/* Progress Bar */}
           <div className="mb-8">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm font-medium text-gray-600">Progresso</span>
-              <span className="text-sm font-medium text-indigo-600">{Math.round(((quizStep + 1) / 16) * 100)}%</span>
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-sm font-medium text-gray-700">Progresso</span>
+              <span className="text-sm font-medium text-indigo-600">{Math.round((quizStep / 15) * 100)}%</span>
             </div>
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div 
-                className="bg-gradient-to-r from-indigo-500 to-purple-600 h-2 rounded-full transition-all duration-500"
-                style={{ width: `${((quizStep + 1) / 16) * 100}%` }}
+                className="bg-gradient-to-r from-indigo-500 to-purple-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${(quizStep / 15) * 100}%` }}
               />
             </div>
           </div>
 
           {/* Quiz Card */}
-          <div className="bg-white rounded-3xl shadow-2xl p-8 sm:p-12">
-            <div className="mb-8">
-              <div className="bg-gradient-to-br from-indigo-500 to-purple-600 p-3 rounded-2xl w-fit mb-4">
-                <Activity className="w-8 h-8 text-white" />
+          <div className="bg-white rounded-2xl shadow-xl p-8">
+            {/* Pergunta 0 */}
+            {quizStep === 0 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Você está usando medicação GLP-1?</h2>
+                <p className="text-gray-600">Medicações como Ozempic, Wegovy, Mounjaro, etc.</p>
+                <div className="space-y-3">
+                  <button
+                    onClick={() => setQuizData({...quizData, usingGLP1: 'sim'})}
+                    className={`w-full p-4 rounded-xl border-2 transition-all ${
+                      quizData.usingGLP1 === 'sim' 
+                        ? 'border-indigo-500 bg-indigo-50' 
+                        : 'border-gray-200 hover:border-indigo-300'
+                    }`}
+                  >
+                    Sim, estou usando
+                  </button>
+                  <button
+                    onClick={() => setQuizData({...quizData, usingGLP1: 'nao'})}
+                    className={`w-full p-4 rounded-xl border-2 transition-all ${
+                      quizData.usingGLP1 === 'nao' 
+                        ? 'border-indigo-500 bg-indigo-50' 
+                        : 'border-gray-200 hover:border-indigo-300'
+                    }`}
+                  >
+                    Não, ainda não comecei
+                  </button>
+                </div>
               </div>
-              <h2 className="text-3xl sm:text-4xl font-bold text-gray-800 mb-2">
-                {currentQuestion.title}
-              </h2>
-              <p className="text-gray-600">Vamos personalizar sua experiência</p>
-            </div>
+            )}
 
-            {/* Options or Input */}
-            <div className="space-y-3 mb-8">
-              {currentQuestion.options ? (
-                currentQuestion.options.map((option) => {
-                  const Icon = option.icon;
-                  let isSelected = false;
-                  
-                  // Determinar qual campo verificar baseado no step
-                  if (quizStep === 0) isSelected = quizData.usingGLP1 === option.value;
-                  else if (quizStep === 1) isSelected = quizData.medication === option.value;
-                  else if (quizStep === 3) isSelected = quizData.applicationFrequency === option.value;
-                  else if (quizStep === 4) isSelected = quizData.gender === option.value;
-                  else if (quizStep === 10) isSelected = quizData.goalSpeed === option.value;
-                  else if (quizStep === 11) isSelected = quizData.activityLevel === option.value;
-                  else if (quizStep === 12) isSelected = quizData.strongestCravingDay === option.value;
-                  else if (quizStep === 13) isSelected = quizData.mainSideEffect === option.value;
-                  
-                  return (
+            {/* Pergunta 1 */}
+            {quizStep === 1 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Qual medicação você está usando?</h2>
+                <div className="space-y-3">
+                  {['Ozempic', 'Wegovy', 'Mounjaro', 'Saxenda', 'Victoza', 'Outra'].map((med) => (
                     <button
-                      key={option.value}
-                      onClick={() => {
-                        if (quizStep === 0) setQuizData({ ...quizData, usingGLP1: option.value });
-                        else if (quizStep === 1) setQuizData({ ...quizData, medication: option.value });
-                        else if (quizStep === 3) setQuizData({ ...quizData, applicationFrequency: option.value });
-                        else if (quizStep === 4) setQuizData({ ...quizData, gender: option.value });
-                        else if (quizStep === 10) setQuizData({ ...quizData, goalSpeed: option.value });
-                        else if (quizStep === 11) setQuizData({ ...quizData, activityLevel: option.value });
-                        else if (quizStep === 12) setQuizData({ ...quizData, strongestCravingDay: option.value });
-                        else if (quizStep === 13) setQuizData({ ...quizData, mainSideEffect: option.value });
-                      }}
-                      className={`w-full flex items-center gap-4 p-5 rounded-2xl border-2 transition-all ${
-                        isSelected
-                          ? 'border-indigo-500 bg-indigo-50 shadow-lg'
-                          : 'border-gray-200 hover:border-indigo-300 hover:bg-gray-50'
+                      key={med}
+                      onClick={() => setQuizData({...quizData, medication: med.toLowerCase()})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all ${
+                        quizData.medication === med.toLowerCase() 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
                       }`}
                     >
-                      <div className={`p-3 rounded-xl ${
-                        isSelected ? 'bg-indigo-500' : 'bg-gray-100'
-                      }`}>
-                        <Icon className={`w-6 h-6 ${isSelected ? 'text-white' : 'text-gray-600'}`} />
-                      </div>
-                      <span className={`text-lg font-medium ${
-                        isSelected ? 'text-indigo-700' : 'text-gray-700'
-                      }`}>
-                        {option.label}
-                      </span>
-                      {isSelected && (
-                        <CheckCircle2 className="w-6 h-6 text-indigo-500 ml-auto" />
-                      )}
+                      {med}
                     </button>
-                  );
-                })
-              ) : currentQuestion.type === 'measurements' ? (
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 2 */}
+            {quizStep === 2 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Qual a dose atual?</h2>
+                <input
+                  type="text"
+                  placeholder="Ex: 0.5mg, 1mg, 2.5mg..."
+                  value={quizData.currentDose}
+                  onChange={(e) => setQuizData({...quizData, currentDose: e.target.value})}
+                  className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+            )}
+
+            {/* Pergunta 3 */}
+            {quizStep === 3 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Frequência de aplicação</h2>
+                <div className="space-y-3">
+                  {[
+                    { value: 'semanal', label: 'Semanal' },
+                    { value: 'quinzenal', label: 'Quinzenal' },
+                    { value: 'diaria', label: 'Diária' }
+                  ].map((freq) => (
+                    <button
+                      key={freq.value}
+                      onClick={() => setQuizData({...quizData, applicationFrequency: freq.value})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all ${
+                        quizData.applicationFrequency === freq.value 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      {freq.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 4 */}
+            {quizStep === 4 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Qual seu gênero?</h2>
+                <div className="space-y-3">
+                  <button
+                    onClick={() => setQuizData({...quizData, gender: 'feminino'})}
+                    className={`w-full p-4 rounded-xl border-2 transition-all ${
+                      quizData.gender === 'feminino' 
+                        ? 'border-indigo-500 bg-indigo-50' 
+                        : 'border-gray-200 hover:border-indigo-300'
+                    }`}
+                  >
+                    Feminino
+                  </button>
+                  <button
+                    onClick={() => setQuizData({...quizData, gender: 'masculino'})}
+                    className={`w-full p-4 rounded-xl border-2 transition-all ${
+                      quizData.gender === 'masculino' 
+                        ? 'border-indigo-500 bg-indigo-50' 
+                        : 'border-gray-200 hover:border-indigo-300'
+                    }`}
+                  >
+                    Masculino
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 5 */}
+            {quizStep === 5 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Data de nascimento</h2>
+                <div className="grid grid-cols-3 gap-4">
+                  <input
+                    type="number"
+                    placeholder="Dia"
+                    min="1"
+                    max="31"
+                    value={quizData.birthDay}
+                    onChange={(e) => setQuizData({...quizData, birthDay: e.target.value})}
+                    className="p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Mês"
+                    min="1"
+                    max="12"
+                    value={quizData.birthMonth}
+                    onChange={(e) => setQuizData({...quizData, birthMonth: e.target.value})}
+                    className="p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Ano"
+                    min="1900"
+                    max="2024"
+                    value={quizData.birthYear}
+                    onChange={(e) => setQuizData({...quizData, birthYear: e.target.value})}
+                    className="p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 6 */}
+            {quizStep === 6 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Suas medidas atuais</h2>
                 <div className="space-y-4">
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Altura (cm)</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Altura (cm)</label>
                     <input
                       type="number"
-                      value={quizData.measurements.height}
-                      onChange={(e) => setQuizData({ 
-                        ...quizData, 
-                        measurements: { ...quizData.measurements, height: e.target.value }
-                      })}
                       placeholder="Ex: 170"
-                      className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
-                      required
+                      value={quizData.measurements.height}
+                      onChange={(e) => setQuizData({...quizData, measurements: {...quizData.measurements, height: e.target.value}})}
+                      className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Peso atual (kg)</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Peso atual (kg)</label>
                     <input
                       type="number"
                       step="0.1"
+                      placeholder="Ex: 75.5"
                       value={quizData.measurements.weight}
-                      onChange={(e) => setQuizData({ 
-                        ...quizData, 
-                        measurements: { ...quizData.measurements, weight: e.target.value }
-                      })}
-                      placeholder="Ex: 85.5"
-                      className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
-                      required
+                      onChange={(e) => setQuizData({...quizData, measurements: {...quizData.measurements, weight: e.target.value}})}
+                      className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Cintura (cm) - Opcional</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Cintura (cm) - Opcional</label>
                     <input
                       type="number"
-                      value={quizData.measurements.waist}
-                      onChange={(e) => setQuizData({ 
-                        ...quizData, 
-                        measurements: { ...quizData.measurements, waist: e.target.value }
-                      })}
                       placeholder="Ex: 90"
-                      className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
+                      value={quizData.measurements.waist}
+                      onChange={(e) => setQuizData({...quizData, measurements: {...quizData.measurements, waist: e.target.value}})}
+                      className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
                 </div>
-              ) : currentQuestion.type === 'contact' ? (
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Nome</label>
-                    <input
-                      type="text"
-                      value={quizData.name}
-                      onChange={(e) => setQuizData({ ...quizData, name: e.target.value })}
-                      placeholder="Seu nome"
-                      className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Email</label>
-                    <input
-                      type="email"
-                      value={quizData.email}
-                      onChange={(e) => setQuizData({ ...quizData, email: e.target.value })}
-                      placeholder="seu@email.com"
-                      className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Telefone</label>
-                    <input
-                      type="tel"
-                      value={quizData.phone}
-                      onChange={(e) => setQuizData({ ...quizData, phone: e.target.value })}
-                      placeholder="(11) 99999-9999"
-                      className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
-                      required
-                    />
-                  </div>
-                </div>
-              ) : currentQuestion.type === 'textarea' ? (
-                <textarea
-                  value={quizData[currentQuestion.field as keyof typeof quizData] as string}
-                  onChange={(e) => setQuizData({ ...quizData, [currentQuestion.field as string]: e.target.value })}
-                  placeholder={currentQuestion.placeholder}
-                  className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg resize-none"
-                  rows={4}
-                  required
-                />
-              ) : (
-                <div>
+              </div>
+            )}
+
+            {/* Pergunta 7 */}
+            {quizStep === 7 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Quando iniciou o protocolo?</h2>
+                <div className="grid grid-cols-3 gap-4">
                   <input
-                    type={currentQuestion.type}
-                    step={currentQuestion.type === 'number' ? '0.1' : undefined}
-                    value={quizData[currentQuestion.field as keyof typeof quizData] as string}
-                    onChange={(e) => setQuizData({ ...quizData, [currentQuestion.field as string]: e.target.value })}
-                    placeholder={currentQuestion.placeholder}
-                    className="w-full px-6 py-4 border-2 border-gray-200 rounded-2xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-lg"
-                    required
+                    type="number"
+                    placeholder="Dia"
+                    min="1"
+                    max="31"
+                    value={quizData.protocolStartDay}
+                    onChange={(e) => setQuizData({...quizData, protocolStartDay: e.target.value})}
+                    className="p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Mês"
+                    min="1"
+                    max="12"
+                    value={quizData.protocolStartMonth}
+                    onChange={(e) => setQuizData({...quizData, protocolStartMonth: e.target.value})}
+                    className="p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    placeholder="Ano"
+                    min="2020"
+                    max="2024"
+                    value={quizData.protocolStartYear}
+                    onChange={(e) => setQuizData({...quizData, protocolStartYear: e.target.value})}
+                    className="p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                   />
                 </div>
+              </div>
+            )}
+
+            {/* Pergunta 8 */}
+            {quizStep === 8 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Peso inicial do protocolo (kg)</h2>
+                <input
+                  type="number"
+                  step="0.1"
+                  placeholder="Ex: 85.5"
+                  value={quizData.startingWeight}
+                  onChange={(e) => setQuizData({...quizData, startingWeight: e.target.value})}
+                  className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+            )}
+
+            {/* Pergunta 9 */}
+            {quizStep === 9 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Qual seu peso meta? (kg)</h2>
+                <input
+                  type="number"
+                  step="0.1"
+                  placeholder="Ex: 70.0"
+                  value={quizData.targetWeight}
+                  onChange={(e) => setQuizData({...quizData, targetWeight: e.target.value})}
+                  className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+            )}
+
+            {/* Pergunta 10 */}
+            {quizStep === 10 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Velocidade de emagrecimento desejada</h2>
+                <div className="space-y-3">
+                  {[
+                    { value: 'lenta', label: 'Lenta e sustentável (0.5kg/semana)' },
+                    { value: 'moderada', label: 'Moderada (0.7kg/semana)' },
+                    { value: 'rapida', label: 'Rápida (1kg/semana)' }
+                  ].map((speed) => (
+                    <button
+                      key={speed.value}
+                      onClick={() => setQuizData({...quizData, goalSpeed: speed.value})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all text-left ${
+                        quizData.goalSpeed === speed.value 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      {speed.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 11 */}
+            {quizStep === 11 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Nível de atividade física</h2>
+                <div className="space-y-3">
+                  {[
+                    { value: 'sedentario', label: 'Sedentário (pouco ou nenhum exercício)' },
+                    { value: 'leve', label: 'Leve (1-3 dias/semana)' },
+                    { value: 'moderado', label: 'Moderado (3-5 dias/semana)' },
+                    { value: 'intenso', label: 'Intenso (6-7 dias/semana)' }
+                  ].map((level) => (
+                    <button
+                      key={level.value}
+                      onClick={() => setQuizData({...quizData, activityLevel: level.value})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all text-left ${
+                        quizData.activityLevel === level.value 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      {level.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 12 */}
+            {quizStep === 12 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Qual período você sente mais fome/compulsão?</h2>
+                <div className="space-y-3">
+                  {[
+                    { value: 'manha', label: 'Manhã' },
+                    { value: 'tarde', label: 'Tarde' },
+                    { value: 'noite', label: 'Noite' },
+                    { value: 'madrugada', label: 'Madrugada' }
+                  ].map((period) => (
+                    <button
+                      key={period.value}
+                      onClick={() => setQuizData({...quizData, strongestCravingDay: period.value})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all ${
+                        quizData.strongestCravingDay === period.value 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      {period.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 13 */}
+            {quizStep === 13 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Principal efeito colateral que você enfrenta</h2>
+                <div className="space-y-3">
+                  {[
+                    { value: 'nausea', label: 'Náusea' },
+                    { value: 'constipacao', label: 'Constipação' },
+                    { value: 'diarreia', label: 'Diarreia' },
+                    { value: 'fadiga', label: 'Fadiga' },
+                    { value: 'nenhum', label: 'Nenhum significativo' }
+                  ].map((effect) => (
+                    <button
+                      key={effect.value}
+                      onClick={() => setQuizData({...quizData, mainSideEffect: effect.value})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all ${
+                        quizData.mainSideEffect === effect.value 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      {effect.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 14 */}
+            {quizStep === 14 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Qual sua maior motivação?</h2>
+                <div className="space-y-3">
+                  {[
+                    { value: 'saude', label: 'Melhorar a saúde' },
+                    { value: 'estetica', label: 'Estética e aparência' },
+                    { value: 'autoestima', label: 'Autoestima e confiança' },
+                    { value: 'qualidade', label: 'Qualidade de vida' }
+                  ].map((mot) => (
+                    <button
+                      key={mot.value}
+                      onClick={() => setQuizData({...quizData, motivation: mot.value})}
+                      className={`w-full p-4 rounded-xl border-2 transition-all ${
+                        quizData.motivation === mot.value 
+                          ? 'border-indigo-500 bg-indigo-50' 
+                          : 'border-gray-200 hover:border-indigo-300'
+                      }`}
+                    >
+                      {mot.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Pergunta 15 - Dados Pessoais */}
+            {quizStep === 15 && (
+              <div className="space-y-6">
+                <h2 className="text-2xl font-bold text-gray-900">Seus dados de contato</h2>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Nome completo</label>
+                    <input
+                      type="text"
+                      placeholder="Seu nome"
+                      value={quizData.name}
+                      onChange={(e) => setQuizData({...quizData, name: e.target.value})}
+                      className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">E-mail</label>
+                    <input
+                      type="email"
+                      placeholder="seu@email.com"
+                      value={quizData.email}
+                      onChange={(e) => setQuizData({...quizData, email: e.target.value})}
+                      className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Telefone</label>
+                    <input
+                      type="tel"
+                      placeholder="(00) 00000-0000"
+                      value={quizData.phone}
+                      onChange={(e) => setQuizData({...quizData, phone: e.target.value})}
+                      className="w-full p-4 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Botões de Navegação */}
+            <div className="flex gap-4 mt-8">
+              {quizStep > 0 && (
+                <button
+                  onClick={() => setQuizStep(quizStep - 1)}
+                  className="px-6 py-3 rounded-xl border-2 border-gray-200 hover:border-gray-300 transition-all"
+                >
+                  Voltar
+                </button>
               )}
+              <button
+                onClick={handleQuizNext}
+                disabled={!isQuizStepValid()}
+                className={`flex-1 px-6 py-3 rounded-xl font-medium transition-all ${
+                  isQuizStepValid()
+                    ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white hover:shadow-lg'
+                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                }`}
+              >
+                {quizStep === 15 ? 'Finalizar' : 'Próximo'}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Tela de Plano Personalizado
+  if (showPersonalizedPlan) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 py-8 px-4">
+        <div className="max-w-4xl mx-auto">
+          <div className="bg-white rounded-2xl shadow-xl p-8 mb-6">
+            <div className="text-center mb-8">
+              <div className="inline-flex items-center justify-center w-16 h-16 bg-gradient-to-br from-green-400 to-emerald-500 rounded-full mb-4">
+                <CheckCircle2 className="w-8 h-8 text-white" />
+              </div>
+              <h1 className="text-3xl font-bold text-gray-900 mb-2">Seu Plano Personalizado Está Pronto!</h1>
+              <p className="text-gray-600">Baseado nas suas respostas, criamos um plano sob medida para você</p>
             </div>
 
-            {/* Next Button */}
+            {/* Resumo do Perfil */}
+            <div className="grid md:grid-cols-2 gap-6 mb-8">
+              <div className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-xl p-6">
+                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <Target className="w-5 h-5 text-indigo-600" />
+                  Seu Objetivo
+                </h3>
+                <div className="space-y-2 text-sm">
+                  <p><span className="font-medium">Peso Inicial:</span> {quizData.startingWeight}kg</p>
+                  <p><span className="font-medium">Peso Atual:</span> {quizData.measurements.weight}kg</p>
+                  <p><span className="font-medium">Peso Meta:</span> {quizData.targetWeight}kg</p>
+                  <p><span className="font-medium">Faltam:</span> {(parseFloat(quizData.measurements.weight) - parseFloat(quizData.targetWeight)).toFixed(1)}kg</p>
+                </div>
+              </div>
+
+              <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-xl p-6">
+                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-green-600" />
+                  Seu Protocolo
+                </h3>
+                <div className="space-y-2 text-sm">
+                  <p><span className="font-medium">Medicação:</span> {quizData.medication}</p>
+                  <p><span className="font-medium">Dose:</span> {quizData.currentDose}</p>
+                  <p><span className="font-medium">Frequência:</span> {quizData.applicationFrequency}</p>
+                  <p><span className="font-medium">Próxima aplicação:</span> {calculateNextApplication()}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Recomendações Nutricionais */}
+            <div className="bg-gradient-to-br from-orange-50 to-amber-50 rounded-xl p-6 mb-6">
+              <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                <Utensils className="w-5 h-5 text-orange-600" />
+                Metas Nutricionais Diárias
+              </h3>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-blue-600">{calculateWaterIntake()}L</div>
+                  <div className="text-sm text-gray-600">Água</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-red-600">{calculateProtein()}g</div>
+                  <div className="text-sm text-gray-600">Proteína</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-green-600">{calculateFiber()}g</div>
+                  <div className="text-sm text-gray-600">Fibras</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Call to Action */}
+            <div className="text-center">
+              <button
+                onClick={handleContinueToSubscription}
+                className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-8 py-4 rounded-xl font-bold text-lg hover:shadow-lg transition-all inline-flex items-center gap-2"
+              >
+                Continuar para Assinatura
+                <ArrowRight className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Tela de Seleção de Plano
+  if (showPlanSelection) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 py-8 px-4">
+        <div className="max-w-4xl mx-auto">
+          <div className="text-center mb-12">
+            <h1 className="text-4xl font-bold text-gray-900 mb-4">Escolha Seu Plano</h1>
+            <p className="text-xl text-gray-600">Desbloqueie todo o potencial do OzemFit</p>
+          </div>
+
+          <div className="max-w-md mx-auto">
+            {/* Plano Personalizado Único */}
+            <div className="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl shadow-2xl p-8 text-white relative overflow-hidden">
+              <div className="absolute top-0 right-0 bg-yellow-400 text-gray-900 px-4 py-1 text-sm font-bold rounded-bl-xl">
+                RECOMENDADO
+              </div>
+
+              <div className="text-center mb-6">
+                <h3 className="text-2xl font-bold mb-2">Plano Personalizado</h3>
+                <div className="flex items-baseline justify-center gap-2">
+                  <span className="text-5xl font-bold">R$ 9,90</span>
+                  <span className="text-indigo-100">/mês</span>
+                </div>
+              </div>
+
+              <ul className="space-y-4 mb-8">
+                <li className="flex items-start gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span>Diário completo de peso e medicação</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span>Acompanhamento de hábitos saudáveis</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span>Gráficos de evolução</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <CheckCircle2 className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span>Lembretes de medicação</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span className="font-medium">Plano nutricional personalizado</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span className="font-medium">Metas adaptadas ao seu perfil</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span className="font-medium">Dicas personalizadas diárias</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span className="font-medium">Acompanhamento de efeitos colaterais</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Sparkles className="w-5 h-5 text-yellow-300 flex-shrink-0 mt-0.5" />
+                  <span className="font-medium">Suporte prioritário</span>
+                </li>
+              </ul>
+
+              <button
+                onClick={handleSelectPlan}
+                className="w-full bg-white text-indigo-600 py-4 rounded-xl font-bold hover:bg-indigo-50 transition-all"
+              >
+                Assinar Plano Personalizado
+              </button>
+            </div>
+          </div>
+
+          <div className="text-center mt-8">
+            <p className="text-gray-600 mb-4">Pagamento seguro via Stripe • Cancele quando quiser</p>
             <button
-              onClick={handleQuizNext}
-              disabled={!isQuizStepValid()}
-              className={`w-full py-4 rounded-2xl font-semibold text-lg flex items-center justify-center gap-2 transition-all ${
-                isQuizStepValid()
-                  ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white hover:shadow-xl hover:scale-[1.02]'
-                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-              }`}
+              onClick={() => {
+                setShowPlanSelection(false);
+                setShowQuiz(false);
+              }}
+              className="text-indigo-600 hover:text-indigo-700 font-medium"
             >
-              {quizStep === 15 ? 'Finalizar' : 'Próxima'}
-              <ArrowRight className="w-5 h-5" />
+              Voltar ao app
             </button>
           </div>
         </div>
@@ -612,6 +1169,30 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
+      {/* Componente de Debug Premium (apenas em desenvolvimento) */}
+      {process.env.NODE_ENV === 'development' && <PremiumDebug />}
+      
+      {/* Alerta de Upgrade */}
+      {showUpgradeAlert && (
+        <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 animate-bounce">
+          <div className="bg-gradient-to-r from-orange-500 to-red-600 text-white px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-3 max-w-md">
+            <AlertCircle className="w-6 h-6 flex-shrink-0" />
+            <div>
+              <p className="font-bold text-sm">
+                {!quizCompleted 
+                  ? 'Complete o quiz na aba "Emagrecer" primeiro!' 
+                  : 'Complete seu plano para desbloquear todas as funcionalidades!'}
+              </p>
+              <p className="text-xs mt-1">
+                {!quizCompleted 
+                  ? 'Responda o quiz para receber seu plano personalizado' 
+                  : 'Acesse todas as funcionalidades premium'}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <header className="bg-white/80 backdrop-blur-md shadow-sm border-b border-gray-200 sticky top-0 z-20">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
@@ -622,14 +1203,32 @@ export default function Home() {
               </div>
               <div>
                 <h1 className="text-2xl font-bold bg-gradient-to-r from-indigo-600 to-purple-600 bg-clip-text text-transparent">
-                  OzeFit
+                  OzemFit
                 </h1>
-                <p className="text-xs text-gray-600">Acompanhe sua jornada de saúde</p>
+                <p className="text-xs text-gray-600">
+                  {currentUser?.user_metadata?.name || currentUser?.email || 'Usuário'}
+                </p>
               </div>
             </div>
-            <div className="hidden sm:flex items-center gap-2 bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-4 py-2 rounded-xl shadow-lg">
-              <Target className="w-4 h-4" />
-              <span className="text-sm font-medium">Meta: -10kg</span>
+            <div className="flex items-center gap-3">
+              {isPremium ? (
+                <div className="flex items-center gap-2 bg-gradient-to-r from-green-500 to-emerald-600 text-white px-4 py-2 rounded-xl shadow-lg">
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span className="text-sm font-medium">Premium</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 bg-gray-200 text-gray-600 px-4 py-2 rounded-xl">
+                  <Lock className="w-4 h-4" />
+                  <span className="text-sm font-medium">Gratuito</span>
+                </div>
+              )}
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-2 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded-xl transition-all"
+              >
+                <LogOut className="w-4 h-4" />
+                <span className="text-sm font-medium hidden sm:inline">Sair</span>
+              </button>
             </div>
           </div>
         </div>
@@ -651,7 +1250,13 @@ export default function Home() {
               <span className="text-sm">Dashboard</span>
             </button>
             <button
-              onClick={() => setActiveTab('weight')}
+              onClick={() => {
+                if (!canAccessFeature()) {
+                  handleLockedFeatureClick();
+                } else {
+                  setActiveTab('weight');
+                }
+              }}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all whitespace-nowrap ${
                 activeTab === 'weight'
                   ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-200'
@@ -660,9 +1265,16 @@ export default function Home() {
             >
               <Scale className="w-4 h-4" />
               <span className="text-sm">Peso</span>
+              {!canAccessFeature() && <Lock className="w-3 h-3" />}
             </button>
             <button
-              onClick={() => setActiveTab('medication')}
+              onClick={() => {
+                if (!canAccessFeature()) {
+                  handleLockedFeatureClick();
+                } else {
+                  setActiveTab('medication');
+                }
+              }}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all whitespace-nowrap ${
                 activeTab === 'medication'
                   ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-200'
@@ -671,9 +1283,16 @@ export default function Home() {
             >
               <Pill className="w-4 h-4" />
               <span className="text-sm">Medicação</span>
+              {!canAccessFeature() && <Lock className="w-3 h-3" />}
             </button>
             <button
-              onClick={() => setActiveTab('habits')}
+              onClick={() => {
+                if (!canAccessFeature()) {
+                  handleLockedFeatureClick();
+                } else {
+                  setActiveTab('habits');
+                }
+              }}
               className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all whitespace-nowrap ${
                 activeTab === 'habits'
                   ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-200'
@@ -682,6 +1301,36 @@ export default function Home() {
             >
               <Heart className="w-4 h-4" />
               <span className="text-sm">Hábitos</span>
+              {!canAccessFeature() && <Lock className="w-3 h-3" />}
+            </button>
+            <button
+              onClick={() => {
+                if (!canAccessFeature()) {
+                  handleLockedFeatureClick();
+                } else {
+                  setActiveTab('plan');
+                }
+              }}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all whitespace-nowrap ${
+                activeTab === 'plan'
+                  ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-200'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              <span className="text-sm">Plano Personalizado</span>
+              {!canAccessFeature() && <Lock className="w-3 h-3" />}
+            </button>
+            <button
+              onClick={() => setActiveTab('emagrecer')}
+              className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-medium transition-all whitespace-nowrap ${
+                activeTab === 'emagrecer'
+                  ? 'bg-gradient-to-r from-indigo-500 to-purple-600 text-white shadow-lg shadow-indigo-200'
+                  : 'text-gray-600 hover:bg-gray-100'
+              }`}
+            >
+              <Apple className="w-4 h-4" />
+              <span className="text-sm">Emagrecer</span>
             </button>
           </nav>
         </div>
@@ -689,643 +1338,588 @@ export default function Home() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-20">
-        {/* Dashboard */}
+        {/* Dashboard Tab */}
         {activeTab === 'dashboard' && (
           <div className="space-y-6">
             {/* Stats Cards */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-              {/* Card Peso Atual */}
-              <div className="bg-white rounded-2xl p-4 sm:p-6 shadow-lg border border-indigo-100 hover:shadow-xl transition-all">
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <div className="bg-indigo-100 p-2 rounded-xl">
-                      <Scale className="w-5 h-5 text-indigo-600" />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-2xl sm:text-3xl font-bold text-gray-800">{stats.currentWeight.toFixed(1)}</p>
-                    <p className="text-xs sm:text-sm text-gray-600 mt-1">Peso Atual (kg)</p>
-                  </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                  <Scale className="w-8 h-8 text-indigo-600" />
                 </div>
+                <div className="text-3xl font-bold text-gray-900">{stats.currentWeight.toFixed(1)}kg</div>
+                <div className="text-sm text-gray-600">Peso Atual</div>
               </div>
 
-              {/* Card Perda de Peso */}
-              <div className="bg-white rounded-2xl p-4 sm:p-6 shadow-lg border border-green-100 hover:shadow-xl transition-all">
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <div className="bg-green-100 p-2 rounded-xl">
-                      <TrendingDown className="w-5 h-5 text-green-600" />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-2xl sm:text-3xl font-bold text-green-600">-{stats.weightLoss.toFixed(1)}</p>
-                    <p className="text-xs sm:text-sm text-gray-600 mt-1">Perda Total (kg)</p>
-                  </div>
+              <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                  <TrendingDown className="w-8 h-8 text-green-600" />
                 </div>
+                <div className="text-3xl font-bold text-gray-900">{stats.weightLoss.toFixed(1)}kg</div>
+                <div className="text-sm text-gray-600">Perdidos</div>
               </div>
 
-              {/* Card Medicamentos */}
-              <div className="bg-white rounded-2xl p-4 sm:p-6 shadow-lg border border-purple-100 hover:shadow-xl transition-all">
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <div className="bg-purple-100 p-2 rounded-xl">
-                      <Pill className="w-5 h-5 text-purple-600" />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-2xl sm:text-3xl font-bold text-gray-800">{stats.medicationCount}</p>
-                    <p className="text-xs sm:text-sm text-gray-600 mt-1">Doses Aplicadas</p>
-                  </div>
+              <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                  <Pill className="w-8 h-8 text-purple-600" />
                 </div>
+                <div className="text-3xl font-bold text-gray-900">{stats.medicationCount}</div>
+                <div className="text-sm text-gray-600">Aplicações</div>
               </div>
 
-              {/* Card Hábitos */}
-              <div className="bg-white rounded-2xl p-4 sm:p-6 shadow-lg border border-pink-100 hover:shadow-xl transition-all">
-                <div className="flex flex-col gap-2">
-                  <div className="flex items-center justify-between">
-                    <div className="bg-pink-100 p-2 rounded-xl">
-                      <Award className="w-5 h-5 text-pink-600" />
-                    </div>
-                  </div>
-                  <div>
-                    <p className="text-2xl sm:text-3xl font-bold text-gray-800">{stats.habitStreak}</p>
-                    <p className="text-xs sm:text-sm text-gray-600 mt-1">Dias Registrados</p>
-                  </div>
+              <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+                <div className="flex items-center justify-between mb-2">
+                  <Heart className="w-8 h-8 text-red-600" />
                 </div>
+                <div className="text-3xl font-bold text-gray-900">{stats.habitStreak}</div>
+                <div className="text-sm text-gray-600">Dias Registrados</div>
               </div>
             </div>
 
-            {/* Gráfico de Peso */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <div className="flex items-center justify-between mb-5">
-                <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center gap-2">
-                  <TrendingDown className="w-5 h-5 text-indigo-600" />
-                  Evolução do Peso
-                </h2>
-                {data.weights.length > 0 && (
-                  <span className="text-xs sm:text-sm text-gray-500">{data.weights.length} registros</span>
-                )}
+            {/* Próxima Aplicação */}
+            {quizCompleted && (
+              <div className="bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl p-6 shadow-xl text-white">
+                <div className="flex items-center gap-3 mb-4">
+                  <Calendar className="w-6 h-6" />
+                  <h3 className="text-xl font-bold">Próxima Aplicação</h3>
+                </div>
+                <p className="text-2xl font-bold mb-2">{calculateNextApplication()}</p>
+                <p className="text-indigo-100">Medicação: {quizData.medication} - Dose: {quizData.currentDose}</p>
               </div>
-              {data.weights.length > 0 ? (
-                <div className="space-y-2">
-                  {data.weights.slice(0, 5).map((entry, index) => {
-                    const prevWeight = data.weights[index + 1]?.weight;
-                    const diff = prevWeight ? entry.weight - prevWeight : 0;
-                    
-                    return (
-                      <div key={entry.id} className="flex items-center justify-between p-3 sm:p-4 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl hover:shadow-md transition-all">
-                        <div className="flex items-center gap-3">
-                          <div className="bg-white p-2 rounded-lg shadow-sm">
-                            <Calendar className="w-4 h-4 text-indigo-600" />
-                          </div>
-                          <span className="text-sm font-medium text-gray-700">
-                            {new Date(entry.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <span className="text-lg sm:text-xl font-bold text-gray-800">{entry.weight} kg</span>
-                          {diff !== 0 && (
-                            <span className={`text-xs sm:text-sm font-semibold px-2 py-1 rounded-lg ${
-                              diff < 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                            }`}>
-                              {diff > 0 ? '+' : ''}{diff.toFixed(1)}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="text-center py-12">
-                  <Scale className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                  <p className="text-gray-500">Nenhum registro de peso ainda</p>
-                  <button
-                    onClick={() => setActiveTab('weight')}
-                    className="mt-4 text-sm text-indigo-600 hover:text-indigo-700 font-medium"
-                  >
-                    Adicionar primeiro registro →
-                  </button>
-                </div>
-              )}
-            </div>
+            )}
 
-            {/* Grid com Medicamentos e Hábitos */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              {/* Últimos Medicamentos */}
-              <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-                <div className="flex items-center justify-between mb-5">
-                  <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center gap-2">
-                    <Pill className="w-5 h-5 text-purple-600" />
-                    Últimas Doses
-                  </h2>
+            {/* Fotos de Evolução */}
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                <ImageIcon className="w-6 h-6 text-indigo-600" />
+                Fotos de Evolução
+              </h3>
+              <div className="grid md:grid-cols-2 gap-6">
+                {/* Foto Antes */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Foto Antes</label>
+                  {beforePhoto ? (
+                    <div className="relative">
+                      <img src={beforePhoto} alt="Antes" className="w-full h-64 object-cover rounded-xl" />
+                      <button
+                        onClick={() => handleRemovePhoto('before')}
+                        className="absolute top-2 right-2 bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition-all"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer hover:border-indigo-500 transition-all">
+                      <Upload className="w-12 h-12 text-gray-400 mb-2" />
+                      <span className="text-sm text-gray-600">Clique para adicionar foto</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => handlePhotoUpload('before', e)}
+                      />
+                    </label>
+                  )}
                 </div>
-                {data.medications.length > 0 ? (
-                  <div className="space-y-3">
-                    {data.medications.slice(0, 3).map((entry) => (
-                      <div key={entry.id} className="flex items-center justify-between p-3 bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl">
-                        <div className="flex-1">
-                          <p className="font-semibold text-gray-800 capitalize text-sm">{entry.medication}</p>
-                          <p className="text-xs text-gray-600 mt-1">{entry.dosage} • {entry.time}</p>
-                        </div>
-                        <span className="text-xs text-gray-500">
-                          {new Date(entry.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="text-center py-8">
-                    <Pill className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-                    <p className="text-sm text-gray-500">Nenhuma dose registrada</p>
-                  </div>
-                )}
-              </div>
 
-              {/* Últimos Hábitos */}
-              <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-                <div className="flex items-center justify-between mb-5">
-                  <h2 className="text-lg sm:text-xl font-bold text-gray-800 flex items-center gap-2">
-                    <Heart className="w-5 h-5 text-pink-600" />
-                    Hábitos Recentes
-                  </h2>
+                {/* Foto Depois */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Foto Depois</label>
+                  {afterPhoto ? (
+                    <div className="relative">
+                      <img src={afterPhoto} alt="Depois" className="w-full h-64 object-cover rounded-xl" />
+                      <button
+                        onClick={() => handleRemovePhoto('after')}
+                        className="absolute top-2 right-2 bg-red-500 text-white p-2 rounded-full hover:bg-red-600 transition-all"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer hover:border-indigo-500 transition-all">
+                      <Upload className="w-12 h-12 text-gray-400 mb-2" />
+                      <span className="text-sm text-gray-600">Clique para adicionar foto</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => handlePhotoUpload('after', e)}
+                      />
+                    </label>
+                  )}
                 </div>
-                {data.habits.length > 0 ? (
-                  <div className="space-y-3">
-                    {data.habits.slice(0, 3).map((entry) => {
-                      const moodEmoji = {
-                        excelente: '😄',
-                        bom: '🙂',
-                        regular: '😐',
-                        ruim: '😔'
-                      };
-                      
-                      return (
-                        <div key={entry.id} className="p-3 bg-gradient-to-r from-pink-50 to-red-50 rounded-xl">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-xs text-gray-600">
-                              {new Date(entry.date).toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' })}
-                            </span>
-                            <span className="text-lg">{moodEmoji[entry.mood]}</span>
-                          </div>
-                          <div className="grid grid-cols-3 gap-2 text-xs">
-                            <div className="flex items-center gap-1">
-                              <Droplet className="w-3 h-3 text-blue-500" />
-                              <span className="text-gray-700">{entry.waterIntake}</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Moon className="w-3 h-3 text-indigo-500" />
-                              <span className="text-gray-700">{entry.sleep}h</span>
-                            </div>
-                            <div className="flex items-center gap-1">
-                              <Dumbbell className="w-3 h-3 text-orange-500" />
-                              <span className="text-gray-700">{entry.exercise ? '✓' : '✗'}</span>
-                            </div>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="text-center py-8">
-                    <Heart className="w-10 h-10 text-gray-300 mx-auto mb-2" />
-                    <p className="text-sm text-gray-500">Nenhum hábito registrado</p>
-                  </div>
-                )}
               </div>
             </div>
           </div>
         )}
 
-        {/* Peso Tab */}
+        {/* Weight Tab */}
         {activeTab === 'weight' && (
           <div className="space-y-6">
-            {/* Formulário */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-5 flex items-center gap-2">
-                <Plus className="w-5 h-5 text-indigo-600" />
-                Registrar Peso
-              </h2>
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Adicionar Peso</h3>
               <form onSubmit={handleAddWeight} className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Data</label>
-                    <input
-                      type="date"
-                      value={weightForm.date}
-                      onChange={(e) => setWeightForm({ ...weightForm, date: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Peso (kg)</label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      value={weightForm.weight}
-                      onChange={(e) => setWeightForm({ ...weightForm, weight: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
-                      placeholder="Ex: 75.5"
-                      required
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">Observações (opcional)</label>
-                  <textarea
-                    value={weightForm.notes}
-                    onChange={(e) => setWeightForm({ ...weightForm, notes: e.target.value })}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all resize-none"
-                    rows={3}
-                    placeholder="Como você está se sentindo?"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-3.5 rounded-xl font-semibold hover:shadow-lg hover:scale-[1.02] transition-all"
-                >
-                  Adicionar Registro
-                </button>
-              </form>
-            </div>
-
-            {/* Lista de Registros */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-5">Histórico de Peso</h2>
-              {data.weights.length > 0 ? (
-                <div className="space-y-3">
-                  {data.weights.map((entry, index) => {
-                    const prevWeight = data.weights[index + 1]?.weight;
-                    const diff = prevWeight ? entry.weight - prevWeight : 0;
-                    
-                    return (
-                      <div key={entry.id} className="p-4 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl hover:shadow-md transition-all">
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-3 mb-2">
-                              <span className="text-sm font-medium text-gray-600">
-                                {new Date(entry.date).toLocaleDateString('pt-BR', { 
-                                  weekday: 'short', 
-                                  day: '2-digit', 
-                                  month: 'short' 
-                                })}
-                              </span>
-                              <span className="text-2xl font-bold text-gray-800">{entry.weight} kg</span>
-                              {diff !== 0 && (
-                                <span className={`text-sm font-semibold px-2.5 py-1 rounded-lg ${
-                                  diff < 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-                                }`}>
-                                  {diff > 0 ? '+' : ''}{diff.toFixed(1)} kg
-                                </span>
-                              )}
-                            </div>
-                            {entry.notes && (
-                              <p className="text-sm text-gray-600 mt-2">{entry.notes}</p>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => {
-                              storage.deleteWeight(entry.id);
-                              refreshData();
-                            }}
-                            className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-lg transition-all"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="text-center py-12">
-                  <Scale className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                  <p className="text-gray-500">Nenhum registro ainda. Adicione seu primeiro peso!</p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Medicamentos Tab */}
-        {activeTab === 'medication' && (
-          <div className="space-y-6">
-            {/* Formulário */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-5 flex items-center gap-2">
-                <Plus className="w-5 h-5 text-purple-600" />
-                Registrar Medicamento
-              </h2>
-              <form onSubmit={handleAddMedication} className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Data</label>
-                    <input
-                      type="date"
-                      value={medForm.date}
-                      onChange={(e) => setMedForm({ ...medForm, date: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Medicamento</label>
-                    <select
-                      value={medForm.medication}
-                      onChange={(e) => setMedForm({ ...medForm, medication: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                    >
-                      <option value="ozempic">Ozempic</option>
-                      <option value="wegovy">Wegovy</option>
-                      <option value="mounjaro">Mounjaro</option>
-                      <option value="zepbound">Zepbound</option>
-                      <option value="outro">Outro</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Dosagem</label>
-                    <input
-                      type="text"
-                      value={medForm.dosage}
-                      onChange={(e) => setMedForm({ ...medForm, dosage: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                      placeholder="Ex: 0.5mg"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Horário</label>
-                    <input
-                      type="time"
-                      value={medForm.time}
-                      onChange={(e) => setMedForm({ ...medForm, time: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
-                      required
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">Observações (opcional)</label>
-                  <textarea
-                    value={medForm.notes}
-                    onChange={(e) => setMedForm({ ...medForm, notes: e.target.value })}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all resize-none"
-                    rows={3}
-                    placeholder="Efeitos colaterais, local da aplicação, etc."
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="w-full bg-gradient-to-r from-purple-500 to-pink-600 text-white py-3.5 rounded-xl font-semibold hover:shadow-lg hover:scale-[1.02] transition-all"
-                >
-                  Adicionar Registro
-                </button>
-              </form>
-            </div>
-
-            {/* Lista de Registros */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-5">Histórico de Medicamentos</h2>
-              {data.medications.length > 0 ? (
-                <div className="space-y-3">
-                  {data.medications.map((entry) => (
-                    <div key={entry.id} className="p-4 bg-gradient-to-r from-purple-50 to-pink-50 rounded-xl hover:shadow-md transition-all">
-                      <div className="flex items-start justify-between">
-                        <div className="flex-1">
-                          <div className="flex items-center gap-3 mb-2">
-                            <div className="bg-white p-2 rounded-lg shadow-sm">
-                              <Pill className="w-4 h-4 text-purple-600" />
-                            </div>
-                            <span className="text-lg font-bold text-gray-800 capitalize">{entry.medication}</span>
-                            <span className="text-sm text-gray-600">{entry.dosage}</span>
-                          </div>
-                          <div className="flex items-center gap-4 text-sm text-gray-600 mt-2 ml-11">
-                            <span className="flex items-center gap-1">
-                              <Calendar className="w-4 h-4" />
-                              {new Date(entry.date).toLocaleDateString('pt-BR')}
-                            </span>
-                            <span>{entry.time}</span>
-                          </div>
-                          {entry.notes && (
-                            <p className="text-sm text-gray-600 mt-3 ml-11">{entry.notes}</p>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => {
-                            storage.deleteMedication(entry.id);
-                            refreshData();
-                          }}
-                          className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-lg transition-all"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-12">
-                  <Pill className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                  <p className="text-gray-500">Nenhum medicamento registrado ainda</p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Hábitos Tab */}
-        {activeTab === 'habits' && (
-          <div className="space-y-6">
-            {/* Formulário */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-5 flex items-center gap-2">
-                <Plus className="w-5 h-5 text-pink-600" />
-                Registrar Hábitos do Dia
-              </h2>
-              <form onSubmit={handleAddHabit} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">Data</label>
+                <div className="grid md:grid-cols-3 gap-4">
                   <input
                     type="date"
-                    value={habitForm.date}
-                    onChange={(e) => setHabitForm({ ...habitForm, date: e.target.value })}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-pink-500 focus:border-transparent transition-all"
+                    value={weightForm.date}
+                    onChange={(e) => setWeightForm({...weightForm, date: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    required
+                  />
+                  <input
+                    type="number"
+                    step="0.1"
+                    placeholder="Peso (kg)"
+                    value={weightForm.weight}
+                    onChange={(e) => setWeightForm({...weightForm, weight: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    required
+                  />
+                  <input
+                    type="text"
+                    placeholder="Observações"
+                    value={weightForm.notes}
+                    onChange={(e) => setWeightForm({...weightForm, notes: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-3 rounded-xl font-medium hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-5 h-5" />
+                  Adicionar Peso
+                </button>
+              </form>
+            </div>
+
+            {/* Histórico de Peso */}
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Histórico</h3>
+              <div className="space-y-3">
+                {data.weights.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">Nenhum registro ainda</p>
+                ) : (
+                  data.weights.map((entry, index) => (
+                    <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
+                      <div>
+                        <div className="font-medium text-gray-900">{entry.weight}kg</div>
+                        <div className="text-sm text-gray-600">{new Date(entry.date).toLocaleDateString('pt-BR')}</div>
+                        {entry.notes && <div className="text-sm text-gray-500 mt-1">{entry.notes}</div>}
+                      </div>
+                      <button
+                        onClick={() => {
+                          storage.deleteWeight(entry.id!);
+                          refreshData();
+                        }}
+                        className="text-red-500 hover:text-red-700 transition-colors"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Medication Tab */}
+        {activeTab === 'medication' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Registrar Medicação</h3>
+              <form onSubmit={handleAddMedication} className="space-y-4">
+                <div className="grid md:grid-cols-2 gap-4">
+                  <input
+                    type="date"
+                    value={medForm.date}
+                    onChange={(e) => setMedForm({...medForm, date: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    required
+                  />
+                  <select
+                    value={medForm.medication}
+                    onChange={(e) => setMedForm({...medForm, medication: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  >
+                    <option value="ozempic">Ozempic</option>
+                    <option value="wegovy">Wegovy</option>
+                    <option value="mounjaro">Mounjaro</option>
+                    <option value="saxenda">Saxenda</option>
+                    <option value="victoza">Victoza</option>
+                  </select>
+                  <input
+                    type="text"
+                    placeholder="Dosagem (ex: 0.5mg)"
+                    value={medForm.dosage}
+                    onChange={(e) => setMedForm({...medForm, dosage: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                    required
+                  />
+                  <input
+                    type="time"
+                    value={medForm.time}
+                    onChange={(e) => setMedForm({...medForm, time: e.target.value})}
+                    className="p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     required
                   />
                 </div>
+                <input
+                  type="text"
+                  placeholder="Observações"
+                  value={medForm.notes}
+                  onChange={(e) => setMedForm({...medForm, notes: e.target.value})}
+                  className="w-full p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
+                <button
+                  type="submit"
+                  className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-3 rounded-xl font-medium hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                >
+                  <Plus className="w-5 h-5" />
+                  Registrar Medicação
+                </button>
+              </form>
+            </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Histórico de Medicação */}
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Histórico</h3>
+              <div className="space-y-3">
+                {data.medications.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">Nenhum registro ainda</p>
+                ) : (
+                  data.medications.map((entry, index) => (
+                    <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
+                      <div>
+                        <div className="font-medium text-gray-900 capitalize">{entry.medication} - {entry.dosage}</div>
+                        <div className="text-sm text-gray-600">
+                          {new Date(entry.date).toLocaleDateString('pt-BR')} às {entry.time}
+                        </div>
+                        {entry.notes && <div className="text-sm text-gray-500 mt-1">{entry.notes}</div>}
+                      </div>
+                      <button
+                        onClick={() => {
+                          storage.deleteMedication(entry.id!);
+                          refreshData();
+                        }}
+                        className="text-red-500 hover:text-red-700 transition-colors"
+                      >
+                        <Trash2 className="w-5 h-5" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Habits Tab */}
+        {activeTab === 'habits' && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Registrar Hábitos</h3>
+              <form onSubmit={handleAddHabit} className="space-y-4">
+                <input
+                  type="date"
+                  value={habitForm.date}
+                  onChange={(e) => setHabitForm({...habitForm, date: e.target.value})}
+                  className="w-full p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                  required
+                />
+                
+                <div className="grid md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                      <Droplet className="w-4 h-4 text-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                      <Droplet className="w-4 h-4 text-blue-600" />
                       Água (copos)
                     </label>
                     <input
                       type="number"
                       value={habitForm.waterIntake}
-                      onChange={(e) => setHabitForm({ ...habitForm, waterIntake: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-pink-500 focus:border-transparent transition-all"
-                      min="0"
-                      required
+                      onChange={(e) => setHabitForm({...habitForm, waterIntake: e.target.value})}
+                      className="w-full p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
+
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                      <Moon className="w-4 h-4 text-indigo-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                      <Moon className="w-4 h-4 text-indigo-600" />
                       Sono (horas)
                     </label>
                     <input
                       type="number"
                       step="0.5"
                       value={habitForm.sleep}
-                      onChange={(e) => setHabitForm({ ...habitForm, sleep: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-pink-500 focus:border-transparent transition-all"
-                      min="0"
-                      max="24"
-                      required
+                      onChange={(e) => setHabitForm({...habitForm, sleep: e.target.value})}
+                      className="w-full p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     />
                   </div>
                 </div>
 
-                <div className="bg-orange-50 p-4 rounded-xl">
-                  <label className="flex items-center gap-3 cursor-pointer">
+                <div>
+                  <label className="flex items-center gap-2 cursor-pointer">
                     <input
                       type="checkbox"
                       checked={habitForm.exercise}
-                      onChange={(e) => setHabitForm({ ...habitForm, exercise: e.target.checked })}
-                      className="w-5 h-5 text-orange-500 rounded focus:ring-2 focus:ring-orange-500"
+                      onChange={(e) => setHabitForm({...habitForm, exercise: e.target.checked})}
+                      className="w-5 h-5 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
                     />
-                    <Dumbbell className="w-5 h-5 text-orange-500" />
-                    <span className="text-sm font-semibold text-gray-700">Fiz exercícios hoje</span>
+                    <Dumbbell className="w-4 h-4 text-green-600" />
+                    <span className="text-sm font-medium text-gray-700">Fiz exercício hoje</span>
                   </label>
-                </div>
-
-                {habitForm.exercise && (
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Duração (minutos)</label>
+                  {habitForm.exercise && (
                     <input
                       type="number"
+                      placeholder="Minutos de exercício"
                       value={habitForm.exerciseMinutes}
-                      onChange={(e) => setHabitForm({ ...habitForm, exerciseMinutes: e.target.value })}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-pink-500 focus:border-transparent transition-all"
-                      min="0"
-                      placeholder="Ex: 30"
+                      onChange={(e) => setHabitForm({...habitForm, exerciseMinutes: e.target.value})}
+                      className="w-full mt-2 p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                     />
-                  </div>
-                )}
+                  )}
+                </div>
 
                 <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                    <Smile className="w-4 h-4 text-yellow-500" />
-                    Como você se sente?
+                  <label className="block text-sm font-medium text-gray-700 mb-2 flex items-center gap-2">
+                    <Smile className="w-4 h-4 text-yellow-600" />
+                    Como está seu humor?
                   </label>
                   <select
                     value={habitForm.mood}
-                    onChange={(e) => setHabitForm({ ...habitForm, mood: e.target.value })}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-pink-500 focus:border-transparent transition-all"
+                    onChange={(e) => setHabitForm({...habitForm, mood: e.target.value})}
+                    className="w-full p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
                   >
-                    <option value="excelente">😄 Excelente</option>
-                    <option value="bom">🙂 Bom</option>
-                    <option value="regular">😐 Regular</option>
-                    <option value="ruim">😔 Ruim</option>
+                    <option value="otimo">Ótimo</option>
+                    <option value="bom">Bom</option>
+                    <option value="regular">Regular</option>
+                    <option value="ruim">Ruim</option>
                   </select>
                 </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">Observações (opcional)</label>
-                  <textarea
-                    value={habitForm.notes}
-                    onChange={(e) => setHabitForm({ ...habitForm, notes: e.target.value })}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-pink-500 focus:border-transparent transition-all resize-none"
-                    rows={3}
-                    placeholder="Como foi seu dia?"
-                  />
-                </div>
+                <input
+                  type="text"
+                  placeholder="Observações"
+                  value={habitForm.notes}
+                  onChange={(e) => setHabitForm({...habitForm, notes: e.target.value})}
+                  className="w-full p-3 rounded-xl border-2 border-gray-200 focus:border-indigo-500 focus:outline-none"
+                />
 
                 <button
                   type="submit"
-                  className="w-full bg-gradient-to-r from-pink-500 to-red-500 text-white py-3.5 rounded-xl font-semibold hover:shadow-lg hover:scale-[1.02] transition-all"
+                  className="w-full bg-gradient-to-r from-indigo-500 to-purple-600 text-white py-3 rounded-xl font-medium hover:shadow-lg transition-all flex items-center justify-center gap-2"
                 >
-                  Adicionar Registro
+                  <Plus className="w-5 h-5" />
+                  Registrar Hábitos
                 </button>
               </form>
             </div>
 
-            {/* Lista de Registros */}
-            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg border border-gray-100">
-              <h2 className="text-xl font-bold text-gray-800 mb-5">Histórico de Hábitos</h2>
-              {data.habits.length > 0 ? (
-                <div className="space-y-3">
-                  {data.habits.map((entry) => {
-                    const moodEmoji = {
-                      excelente: '😄',
-                      bom: '🙂',
-                      regular: '😐',
-                      ruim: '😔'
-                    };
-
-                    return (
-                      <div key={entry.id} className="p-4 bg-gradient-to-r from-pink-50 to-red-50 rounded-xl hover:shadow-md transition-all">
-                        <div className="flex items-start justify-between">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-3 mb-3">
-                              <Calendar className="w-4 h-4 text-gray-400" />
-                              <span className="text-sm font-medium text-gray-600">
-                                {new Date(entry.date).toLocaleDateString('pt-BR', { 
-                                  weekday: 'long', 
-                                  day: '2-digit', 
-                                  month: 'long' 
-                                })}
-                              </span>
-                            </div>
-                            
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-                              <div className="flex items-center gap-2 bg-white p-2 rounded-lg">
-                                <Droplet className="w-4 h-4 text-blue-500" />
-                                <span className="text-sm font-medium text-gray-700">{entry.waterIntake} copos</span>
-                              </div>
-                              <div className="flex items-center gap-2 bg-white p-2 rounded-lg">
-                                <Moon className="w-4 h-4 text-indigo-500" />
-                                <span className="text-sm font-medium text-gray-700">{entry.sleep}h</span>
-                              </div>
-                              <div className="flex items-center gap-2 bg-white p-2 rounded-lg">
-                                <Dumbbell className="w-4 h-4 text-orange-500" />
-                                <span className="text-sm font-medium text-gray-700">
-                                  {entry.exercise ? `${entry.exerciseMinutes || 0} min` : 'Não'}
-                                </span>
-                              </div>
-                              <div className="flex items-center gap-2 bg-white p-2 rounded-lg">
-                                <span className="text-lg">{moodEmoji[entry.mood]}</span>
-                                <span className="text-sm font-medium text-gray-700 capitalize">{entry.mood}</span>
-                              </div>
-                            </div>
-
-                            {entry.notes && (
-                              <p className="text-sm text-gray-600 mt-2 bg-white p-3 rounded-lg">{entry.notes}</p>
-                            )}
-                          </div>
-                          <button
-                            onClick={() => {
-                              storage.deleteHabit(entry.id);
-                              refreshData();
-                            }}
-                            className="text-red-500 hover:text-red-700 hover:bg-red-50 p-2 rounded-lg transition-all"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+            {/* Histórico de Hábitos */}
+            <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+              <h3 className="text-xl font-bold text-gray-900 mb-4">Histórico</h3>
+              <div className="space-y-3">
+                {data.habits.length === 0 ? (
+                  <p className="text-gray-500 text-center py-8">Nenhum registro ainda</p>
+                ) : (
+                  data.habits.map((entry, index) => (
+                    <div key={index} className="p-4 bg-gray-50 rounded-xl">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="font-medium text-gray-900">
+                          {new Date(entry.date).toLocaleDateString('pt-BR')}
+                        </div>
+                        <button
+                          onClick={() => {
+                            storage.deleteHabit(entry.id!);
+                            refreshData();
+                          }}
+                          className="text-red-500 hover:text-red-700 transition-colors"
+                        >
+                          <Trash2 className="w-5 h-5" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                        <div className="flex items-center gap-2">
+                          <Droplet className="w-4 h-4 text-blue-600" />
+                          <span>{entry.waterIntake} copos</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Moon className="w-4 h-4 text-indigo-600" />
+                          <span>{entry.sleep}h</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Dumbbell className="w-4 h-4 text-green-600" />
+                          <span>{entry.exercise ? `${entry.exerciseMinutes || 0}min` : 'Não'}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Smile className="w-4 h-4 text-yellow-600" />
+                          <span className="capitalize">{entry.mood}</span>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <div className="text-center py-12">
-                  <Heart className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                  <p className="text-gray-500">Nenhum hábito registrado ainda</p>
-                </div>
-              )}
+                      {entry.notes && (
+                        <div className="text-sm text-gray-500 mt-2">{entry.notes}</div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
+          </div>
+        )}
+
+        {/* Plan Tab */}
+        {activeTab === 'plan' && (
+          <div className="space-y-6">
+            {quizCompleted ? (
+              <>
+                {/* Resumo do Perfil */}
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-2xl p-6 shadow-lg">
+                    <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                      <Target className="w-5 h-5 text-indigo-600" />
+                      Seu Objetivo
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      <p><span className="font-medium">Peso Inicial:</span> {quizData.startingWeight}kg</p>
+                      <p><span className="font-medium">Peso Atual:</span> {quizData.measurements.weight}kg</p>
+                      <p><span className="font-medium">Peso Meta:</span> {quizData.targetWeight}kg</p>
+                      <p><span className="font-medium">Faltam:</span> {(parseFloat(quizData.measurements.weight) - parseFloat(quizData.targetWeight)).toFixed(1)}kg</p>
+                    </div>
+                  </div>
+
+                  <div className="bg-gradient-to-br from-green-50 to-emerald-50 rounded-2xl p-6 shadow-lg">
+                    <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                      <Activity className="w-5 h-5 text-green-600" />
+                      Seu Protocolo
+                    </h3>
+                    <div className="space-y-2 text-sm">
+                      <p><span className="font-medium">Medicação:</span> {quizData.medication}</p>
+                      <p><span className="font-medium">Dose:</span> {quizData.currentDose}</p>
+                      <p><span className="font-medium">Frequência:</span> {quizData.applicationFrequency}</p>
+                      <p><span className="font-medium">Próxima aplicação:</span> {calculateNextApplication()}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Metas Nutricionais */}
+                <div className="bg-gradient-to-br from-orange-50 to-amber-50 rounded-2xl p-6 shadow-lg">
+                  <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                    <Utensils className="w-5 h-5 text-orange-600" />
+                    Metas Nutricionais Diárias
+                  </h3>
+                  <div className="grid grid-cols-3 gap-4">
+                    <div className="text-center">
+                      <div className="text-3xl font-bold text-blue-600">{calculateWaterIntake()}L</div>
+                      <div className="text-sm text-gray-600">Água</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-3xl font-bold text-red-600">{calculateProtein()}g</div>
+                      <div className="text-sm text-gray-600">Proteína</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-3xl font-bold text-green-600">{calculateFiber()}g</div>
+                      <div className="text-sm text-gray-600">Fibras</div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Dicas Personalizadas */}
+                <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100">
+                  <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                    <Sparkles className="w-5 h-5 text-purple-600" />
+                    Dicas Personalizadas
+                  </h3>
+                  <div className="space-y-3">
+                    <div className="p-4 bg-blue-50 rounded-xl">
+                      <p className="text-sm text-gray-700">
+                        💧 Beba {calculateWaterIntake()}L de água por dia para otimizar os efeitos da medicação e reduzir efeitos colaterais.
+                      </p>
+                    </div>
+                    <div className="p-4 bg-red-50 rounded-xl">
+                      <p className="text-sm text-gray-700">
+                        🥩 Consuma {calculateProtein()}g de proteína diariamente para preservar massa muscular durante o emagrecimento.
+                      </p>
+                    </div>
+                    <div className="p-4 bg-green-50 rounded-xl">
+                      <p className="text-sm text-gray-700">
+                        🥗 Inclua {calculateFiber()}g de fibras para melhorar a digestão e controlar a saciedade.
+                      </p>
+                    </div>
+                    {quizData.mainSideEffect !== 'nenhum' && (
+                      <div className="p-4 bg-yellow-50 rounded-xl">
+                        <p className="text-sm text-gray-700">
+                          ⚠️ Para {quizData.mainSideEffect}: Faça refeições menores e mais frequentes, evite alimentos gordurosos.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="bg-white rounded-2xl p-8 shadow-lg border border-gray-100 text-center">
+                <Lock className="w-16 h-16 text-gray-400 mx-auto mb-4" />
+                <h3 className="text-2xl font-bold text-gray-900 mb-2">Plano Personalizado Bloqueado</h3>
+                <p className="text-gray-600 mb-6">Complete o quiz na aba "Emagrecer" para desbloquear seu plano personalizado</p>
+                <button
+                  onClick={() => setActiveTab('emagrecer')}
+                  className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-8 py-3 rounded-xl font-medium hover:shadow-lg transition-all"
+                >
+                  Ir para o Quiz
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Emagrecer Tab */}
+        {activeTab === 'emagrecer' && (
+          <div className="space-y-6">
+            {!quizCompleted ? (
+              <div className="bg-white rounded-2xl p-8 shadow-lg border border-gray-100 text-center">
+                <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-full mb-6">
+                  <Apple className="w-10 h-10 text-white" />
+                </div>
+                <h2 className="text-3xl font-bold text-gray-900 mb-4">Comece Sua Jornada de Emagrecimento</h2>
+                <p className="text-gray-600 mb-8 max-w-2xl mx-auto">
+                  Responda nosso quiz personalizado e receba um plano sob medida para potencializar seus resultados com GLP-1
+                </p>
+                <button
+                  onClick={() => setShowQuiz(true)}
+                  className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-8 py-4 rounded-xl font-bold text-lg hover:shadow-lg transition-all inline-flex items-center gap-2"
+                >
+                  Iniciar Quiz
+                  <ArrowRight className="w-5 h-5" />
+                </button>
+              </div>
+            ) : (
+              <div className="bg-white rounded-2xl p-8 shadow-lg border border-gray-100 text-center">
+                <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-green-500 to-emerald-600 rounded-full mb-6">
+                  <CheckCircle2 className="w-10 h-10 text-white" />
+                </div>
+                <h2 className="text-3xl font-bold text-gray-900 mb-4">Quiz Completo!</h2>
+                <p className="text-gray-600 mb-8">
+                  Seu plano personalizado está disponível na aba "Plano Personalizado"
+                </p>
+                <div className="flex gap-4 justify-center">
+                  <button
+                    onClick={() => setActiveTab('plan')}
+                    className="bg-gradient-to-r from-indigo-500 to-purple-600 text-white px-8 py-3 rounded-xl font-medium hover:shadow-lg transition-all"
+                  >
+                    Ver Meu Plano
+                  </button>
+                  {!isPremium && (
+                    <button
+                      onClick={() => setShowPlanSelection(true)}
+                      className="bg-gradient-to-r from-green-500 to-emerald-600 text-white px-8 py-3 rounded-xl font-medium hover:shadow-lg transition-all flex items-center gap-2"
+                    >
+                      <CreditCard className="w-5 h-5" />
+                      Assinar Premium
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </main>
